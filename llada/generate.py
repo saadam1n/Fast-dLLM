@@ -208,6 +208,7 @@ def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_len
     steps = steps // num_blocks
 
     nfe = 0  
+    dump_iter = 0
     for num_block in range(num_blocks):
         current_block_start = prompt.shape[1] + num_block * block_length
         current_block_end = current_block_start + block_length
@@ -221,11 +222,15 @@ def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_len
         mask_index = (x == mask_id)
         mask_index[:, current_block_end:] = 0
         if factor is None:
-            x0, transfer_index = get_transfer_index(output.logits, temperature, remasking, mask_index, x, num_transfer_tokens[:, 0] if threshold is None else None, threshold)
+            x0, transfer_index = get_transfer_index(current_block_start, 0, block_length, output.logits, temperature, remasking, mask_index, x, num_transfer_tokens[:, 0] if threshold is None else None, threshold, dump_iter)
         else:
             x0, transfer_index = get_transfer_index_dynamic(output.logits, temperature, remasking, mask_index, x, None, factor)
         x[transfer_index] = x0[transfer_index]
+
+        torch.save(x, f"data/decoded-{dump_iter}.pt")
         nfe += 1
+
+        dump_iter += 1
 
         i = 1
         replace_position = torch.zeros_like(x, dtype=torch.bool)
@@ -239,20 +244,54 @@ def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_len
             logits = model(x[:, current_block_start:current_block_end], past_key_values=past_key_values, use_cache=True, replace_position=replace_position).logits
 
             if factor is None:
-                x0, transfer_index = get_transfer_index(logits, temperature, remasking, mask_index, 
-                                                x[:, current_block_start:current_block_end], num_transfer_tokens[:, i] if threshold is None else None, threshold)
+                x0, transfer_index = get_transfer_index(0, i, block_length, logits, temperature, remasking, mask_index, 
+                                                x[:, current_block_start:current_block_end], num_transfer_tokens[:, i] if threshold is None else None, threshold, dump_iter)
             else:
                 x0, transfer_index = get_transfer_index_dynamic(logits, temperature, remasking, mask_index, 
                                                 x[:, current_block_start:current_block_end], None, factor)
             x[:, current_block_start:current_block_end][transfer_index] = x0[transfer_index]
+            torch.save(x, f"data/decoded-{dump_iter}.pt")
+
+            dump_iter += 1
             i += 1
+
+    print("Total steps:")
+    print(nfe)
 
     return x, nfe
 
 
-def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transfer_tokens, threshold=None):
+def get_transfer_index(current_block_start, iteration, block_length, logits, temperature, remasking, mask_index, x, num_transfer_tokens, threshold=None, dump_iter=0):
     logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
     x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
+
+    transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
+    x0 = torch.where(mask_index, x0, x)
+
+
+    if True:
+        transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
+
+        x0 = torch.where(mask_index, x0, x)
+
+        if False:
+            # determine what tokens to unmask on this iteration 
+            power_of_two = 2 ** (iteration + 1 + 2)
+            distance_between_tokens = block_length // power_of_two
+            for unmask_index in range(current_block_start, current_block_start + block_length, distance_between_tokens):
+                transfer_index[:, unmask_index] = True
+        else:
+            sublock_size = 1
+            sublock_start = current_block_start + sublock_size * iteration 
+
+            transfer_index[:, sublock_start:sublock_start + sublock_size] = True
+
+            torch.save(logits, f"./data/step_{dump_iter}.pt")
+
+        return x0, transfer_index
+
+
+    return x0, transfer_index
 
     if remasking == 'low_confidence':
         p = F.softmax(logits.to(torch.float64), dim=-1)
