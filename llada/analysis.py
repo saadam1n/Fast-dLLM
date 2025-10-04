@@ -13,6 +13,73 @@ step 0, we zero clue about token 0
 
 tokenizer = AutoTokenizer.from_pretrained('GSAI-ML/LLaDA-8B-Instruct', trust_remote_code=True)
 
+with open("data/ntis/config.txt") as f:
+    num_ift_iters = int(next(f))
+    response_start = int(next(f))
+
+print("Num IFT iters")
+print(num_ift_iters)
+print(response_start)
+
+for i in range(4): # 4 * num_ift_iters
+    block_idx = i // num_ift_iters
+    # short for current block start
+    cbs = response_start + block_idx * 32
+    # short for current end
+    cbe = cbs + 32
+
+    cur_tokens = torch.load(f"data/ntis/decoded-{i}.pt").squeeze(0).cpu()
+    cur_logits = torch.load(f"data/ntis/logits-{i}.pt").squeeze(0).cpu()
+    cur_atprob = F.softmax(cur_logits, dim=-1)
+
+    prob_index = cur_tokens if i == 0 else cur_tokens[cbs:cbe]
+    cur_ntprob = torch.gather(cur_atprob, dim=-1, index=prob_index.unsqueeze(-1))
+
+    # fix size funkyness with the first tensor
+    if i == 0:
+        cur_ntprob = cur_ntprob[cbs:cbe]
+
+    #print(cur_tokens)
+    #print(cur_ntprob)
+    print(f"Iter {i}:\t{tokenizer.batch_decode(cur_tokens, skip_special_tokens=False)}")
+
+    if i > 0:
+        print(f"Changes since last iteration:")
+
+        for j in range(cbs, cbe):
+            cpos = cur_tokens[j].item()
+            ppos = prev_tokens[j].item()
+
+            if cpos != ppos:
+                type = "REG\t"
+
+                if (j - cbs) % num_ift_iters == i % num_ift_iters and False:
+                    type = "EXP\t"
+                elif cpos != 126336 and ppos != 126336:
+                    type = "!!!\t"
+            else:
+                type = "\t"
+
+            # print runner up tokens
+            prev_runner_ups = torch.sort(prev_atprob, descending=True)
+            cur_runner_ups = torch.sort(cur_atprob, descending=True)
+
+            # claude: ideally we want to be able to print the k-most probably runner ups
+
+            print(f"\t{type} block pos {j - cbs}: {tokenizer.decode(prev_tokens[j])}\t({prev_ntprob[j - cbs].item():.3f})\t-> {tokenizer.decode(cur_tokens[j])}\t({cur_ntprob[j - cbs].item():.3f})"
+                  f"\t{tokenizer.decode(cur_runner_ups.indices[j - cbs, 1])}\t({cur_runner_ups.values[j - cbs, 1].item():.3f})"
+                  f"\t{tokenizer.decode(prev_runner_ups.indices[j - cbs, 1])}\t({prev_runner_ups.values[j - cbs, 1].item():.3f})"
+            )
+
+    prev_tokens = cur_tokens
+    prev_logits = cur_logits
+    prev_ntprob = cur_ntprob
+    prev_atprob = cur_atprob
+
+    print("\n\n\n")
+
+exit()
+
 for delay in range(1, 8):
     break
 
