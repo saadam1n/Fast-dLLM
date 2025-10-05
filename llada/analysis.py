@@ -1,5 +1,133 @@
 import torch
 import torch.nn.functional as F
+import pandas as pd
+from transformers import AutoTokenizer
+
+"""
+Analyzes how token predictions change across decoding iterations.
+Compares current predictions with previous iterations to track stability.
+"""
+
+# Configuration
+K_RUNNER_UPS = 3  # Number of runner-up tokens to display
+
+# Load tokenizer
+tokenizer = AutoTokenizer.from_pretrained('GSAI-ML/LLaDA-8B-Instruct', trust_remote_code=True)
+
+# Load configuration
+with open("data/ntis/config.txt") as f:
+    num_ift_iters = int(next(f))
+    response_start = int(next(f))
+
+print(f"Num IFT iters: {num_ift_iters}")
+print(f"Response start: {response_start}\n")
+
+prev_tokens = None
+prev_logits = None
+prev_ntprob = None
+prev_atprob = None
+
+for i in range(4 * num_ift_iters): 
+    block_idx = i // num_ift_iters
+    cbs = response_start + block_idx * 32  # current block start
+    cbe = cbs + 32  # current block end
+
+    # Load current iteration data
+    cur_tokens = torch.load(f"data/ntis/decoded-{i}.pt").squeeze(0).cpu()
+    cur_logits = torch.load(f"data/ntis/logits-{i}.pt").squeeze(0).cpu()
+    cur_atprob = F.softmax(cur_logits, dim=-1)
+
+    # Get probabilities for selected tokens
+    prob_index = cur_tokens if i == 0 else cur_tokens[cbs:cbe]
+    cur_ntprob = torch.gather(cur_atprob, dim=-1, index=prob_index.unsqueeze(-1))
+
+    # Fix size for first tensor
+    if i == 0:
+        cur_atprob = cur_atprob[cbs:cbe]
+        cur_ntprob = cur_ntprob[cbs:cbe]
+
+    print(f"Iter {i}: {tokenizer.batch_decode(cur_tokens, skip_special_tokens=False)}\n")
+
+    # Build table data
+    rows = []
+    for j in range(cbs, cbe):
+        cpos = cur_tokens[j].item()
+        
+        row = {
+            'Pos': j - cbs,
+            'Cur Token': tokenizer.decode(cur_tokens[j]),
+            'Cur Prob': f"{cur_ntprob[j - cbs].item():.3f}",
+        }
+        
+        # Add current runner-ups
+        cur_runner_ups = torch.sort(cur_atprob[j - cbs], descending=True)
+        for k in range(0, K_RUNNER_UPS + 1):
+            row[f'Cur R{k}'] = tokenizer.decode(cur_runner_ups.indices[k])
+            row[f'Cur R{k} Prob'] = f"{cur_runner_ups.values[k].item():.3f}"
+        
+        # Add previous iteration data if available
+        if i > 0:
+            ppos = prev_tokens[j].item()
+            
+            # Determine change type
+            if cpos != ppos:
+                if cpos != 126336 and ppos != 126336:
+                    change_type = "!!!"
+                elif ppos == 126336:
+                    change_type = "DEC"
+                elif cpos == 126336:
+                    change_type = "REV"
+                else:
+                    change_type = "???"
+            else:
+                change_type = ""
+            
+            row['Type'] = change_type
+            row['Prev Token'] = tokenizer.decode(prev_tokens[j])
+            row['Prev Prob'] = f"{prev_ntprob[j - cbs].item():.3f}"
+            
+            # Add previous runner-ups
+            prev_runner_ups = torch.sort(prev_atprob[j - cbs], descending=True)
+            for k in range(1, K_RUNNER_UPS + 1):
+                row[f'Prev R{k}'] = tokenizer.decode(prev_runner_ups.indices[k])
+                row[f'Prev R{k} Prob'] = f"{prev_runner_ups.values[k].item():.3f}"
+        
+        rows.append(row)
+
+    # Create and display DataFrame
+    df = pd.DataFrame(rows)
+    
+    # Reorder columns for better readability
+    if i == 0:
+        col_order = ['Pos', 'Cur Token', 'Cur Prob']
+        for k in range(0, K_RUNNER_UPS + 1):
+            col_order.extend([f'Cur R{k}', f'Cur R{k} Prob'])
+    else:
+        col_order = ['Type', 'Pos', 'Prev Token', 'Prev Prob', 'Cur Token', 'Cur Prob']
+        for k in range(0, K_RUNNER_UPS + 1):
+            col_order.extend([f'Cur R{k}', f'Cur R{k} Prob'])
+        for k in range(1, K_RUNNER_UPS + 1):
+            col_order.extend([f'Prev R{k}', f'Prev R{k} Prob'])
+    
+    df = df[col_order]
+    
+    if i == 0:
+        print("Current iteration tokens:")
+    else:
+        print("Changes since last iteration:")
+    print(df.to_string(index=False, col_space=16))
+
+    # Store for next iteration
+    prev_tokens = cur_tokens
+    prev_logits = cur_logits
+    prev_ntprob = cur_ntprob
+    prev_atprob = cur_atprob
+
+    print("\n" + "="*120 + "\n")
+
+exit()
+import torch
+import torch.nn.functional as F
 
 from transformers import AutoTokenizer
 

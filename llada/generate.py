@@ -234,7 +234,7 @@ def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_len
             x0, transfer_index = get_transfer_index_dynamic(output.logits, temperature, remasking, mask_index, x, None, factor)
         x[transfer_index] = x0[transfer_index]
 
-        torch.save(x, f"data/ntis/decoded-{dump_iter}.pt")
+        #torch.save(x, f"data/ntis/decoded-{dump_iter}.pt")
         nfe += 1
 
         dump_iter += 1
@@ -255,7 +255,7 @@ def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_len
                 x0, transfer_index = get_transfer_index_dynamic(logits, temperature, remasking, mask_index, 
                                                 x[:, current_block_start:current_block_end], None, factor)
             x[:, current_block_start:current_block_end][transfer_index] = x0[transfer_index]
-            torch.save(x, f"data/ntis/decoded-{dump_iter}.pt")
+            #torch.save(x, f"data/ntis/decoded-{dump_iter}.pt")
 
             dump_iter += 1
             i += 1
@@ -273,7 +273,57 @@ def get_transfer_index(current_block_start, iteration, block_length, logits, tem
     transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
     transfer_index[:, current_block_start:current_block_start + block_length] = True
 
+
+
     if iteration != num_ift_iters - 1:
+        # low confidence based remasking
+        # do not remask if it was masked the previous iteration
+        p = F.softmax(logits.to(torch.float64), dim=-1)
+        x0_p = torch.squeeze(
+            torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
+
+        for b in range(x0.shape[0]):
+            i = current_block_start
+            while i < current_block_start + block_length:
+                search_token = x0[b, i].item()
+
+                if search_token == 126336:
+                    i += 1
+                    continue
+
+                # use a while loop to fix python funkiness
+                j = i + 1
+                while j < current_block_start + block_length:
+                    if search_token != x0[b, j]:
+                        break
+                    j += 1
+
+                # remask all duplicated tokens
+                if j - i > 1:
+                    if True:
+                        x0[b, i:j] = 126336
+                        pass
+                    else:
+                        # delete those tokens and the space they occupy instead
+                        replacement = torch.cat((x0[b, j:], torch.ones_like(x0[b, i:j]) * 126336), dim=-1)
+                        x0[b, i:] = replacement
+
+                i += 1
+
+
+        # if (confidence > 0.95 OR (confidence < 0.95 and masked in this iter's input)) keep
+        # same as
+        # if (confidence > 0.95 or mask_index)
+        conf_cond = x0_p > 0.9
+        prev_cond = mask_index
+        remask_cond = torch.logical_or(conf_cond, prev_cond)
+
+        # aggressive remasking
+        x0 = torch.where(remask_cond, x0, 126336)
+        
+
+
+
         endoftext = (x0 == 126081)
         eot_id = (x0 == 126348)
 
@@ -281,6 +331,8 @@ def get_transfer_index(current_block_start, iteration, block_length, logits, tem
 
         # if end of response, just use mask for now. 
         x0 = torch.where(skip_end, x, x0)
+
+    if False:
 
         if True:
             # random remask
@@ -312,7 +364,7 @@ def get_transfer_index(current_block_start, iteration, block_length, logits, tem
         #keep_ptc = 0.0
         #x0 = torch.where(x0_p > keep_ptc, x0, 126336)
 
-    torch.save(logits_with_noise, f"data/ntis/logits-{dump_iter}.pt")
+    #torch.save(logits_with_noise, f"data/ntis/logits-{dump_iter}.pt")
 
         
 
