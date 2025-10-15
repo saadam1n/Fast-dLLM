@@ -365,7 +365,6 @@ def get_transfer_index(current_block_start, iteration, block_length, logits, tem
         #x0 = torch.where(x0_p > keep_ptc, x0, 126336)
 
     #torch.save(logits_with_noise, f"data/ntis/logits-{dump_iter}.pt")
-
         
 
     return x0, transfer_index
